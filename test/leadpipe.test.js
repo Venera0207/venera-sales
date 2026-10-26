@@ -186,11 +186,11 @@ const leadRows = () => DB.getSheetByName('Заявки').v;
 console.log('\n=== ВЕНЕРА — ПРОДАЖИ: тесты отдельной трубы ===\n');
 
 /* ---------- 1. диагностика ---------- */
-t('ping отвечает ok и честно про себя: проект venera-sales, версия 1.0', () => {
+t('ping отвечает ok и честно про себя: проект venera-sales, версия 1.1', () => {
   const r = call({ action: 'ping' });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(r.project, 'venera-sales');
-  assert.strictEqual(r.version, 1.0);
+  assert.strictEqual(r.version, 1.1);
   assert.strictEqual(r.bot, true, 'бот не подключён');
   assert.strictEqual(r.ai, true, 'ключ Z.ai не подхватился');
   assert.ok(/venera-sales\/$/.test(r.landing), 'лендинг: ' + r.landing);
@@ -575,6 +575,67 @@ t('в трубе продаж НЕТ ничего салонного: запис
 });
 t('в коде трубы продаж нет ссылок на таблицу и трубу салона', () => {
   assert.ok(!/Записи|Мастер|site-data\.js|ÉCLAT STUDIO — база/.test(SRC), 'в коде остались следы салона');
+});
+
+
+/* ---------- 8. ассистент на лендинге (действие chat) ---------- */
+t('chat: пустое сообщение — вежливо отказывает, не молчит', () => {
+  const r = call({ action: 'chat', s: 'wempty' });
+  assert.strictEqual(r.ok, false, JSON.stringify(r));
+});
+t('chat: «голова» ИИ отвечает и переписка ложится в «Переписка с ботом»', () => {
+  const sh = DB.getSheetByName('Переписка с ботом');
+  const before = sh.getLastRow();
+  const r = call({ action: 'chat', s: 'wtest1', m: 'Здравствуйте! Сколько стоит сайт с онлайн-записью?' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(r.ai, true, 'ИИ не ответил');
+  assert.ok(/30 000/.test(r.reply), 'ответ: ' + r.reply);
+  assert.ok(!/\*\*/.test(r.reply), 'markdown не вычищен: ' + r.reply);
+  const rows = sh.v;
+  assert.strictEqual(rows.length, before + 1, 'строка переписки не добавилась');
+  const last = rows[rows.length - 1];
+  assert.strictEqual(last[1], 'сайт (ассистент)', 'кто: ' + last[1]);
+  assert.strictEqual(last[2], 'web-wtest1', 'сессия: ' + last[2]);
+  assert.ok(last[4].length > 10, 'ответ не сохранён');
+});
+t('chat: память сессии — второй вопрос приходит с историей', () => {
+  call({ action: 'chat', s: 'wmem', m: 'Привет, хочу сайт для салона' });
+  AI_CALLS.length = 0;
+  call({ action: 'chat', s: 'wmem', m: 'А сколько это стоит?' });
+  assert.ok(AI_CALLS.length >= 1, 'второй вопрос не дошёл до ИИ');
+  const msgs = AI_CALLS[AI_CALLS.length - 1].payload.messages;
+  assert.ok(msgs.length >= 4, 'история не приложена: ' + msgs.length);
+  assert.strictEqual(msgs[1].role, 'user');
+  assert.strictEqual(msgs[2].role, 'assistant');
+});
+t('chat: сессии не смешиваются (у каждой своя память)', () => {
+  call({ action: 'chat', s: 'wa1', m: 'Меня зовут Алина, салон Локон' });
+  AI_CALLS.length = 0;
+  call({ action: 'chat', s: 'wa2', m: 'Привет' });
+  const txt = JSON.stringify(AI_CALLS[AI_CALLS.length - 1].payload.messages);
+  assert.ok(!/Алина/.test(txt), 'чужая история попала в другую сессию');
+});
+t('chat: телефон в сообщении — сразу тёплый лид с источником «чат на сайте»', () => {
+  const before = leadRows().length;
+  const r = call({ action: 'chat', s: 'wphone', m: 'Перезвоните мне, пожалуйста: +7 927 850-44-16' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(leadRows().length, before + 1, 'лид не создан');
+  const row = leadRows()[leadRows().length - 1];
+  assert.strictEqual(row[7], 'чат на сайте', 'источник: ' + row[7]);
+  assert.ok(/850-44-16|9278504416/.test(String(row[3])), 'контакт: ' + row[3]);
+});
+t('chat: без ключа ИИ не молчит — отдаёт запасную фразу и ведёт к форме', () => {
+  const saved = global.ZAI_KEY;
+  global.ZAI_KEY = 'ВСТАВЬТЕ_КЛЮЧ_ZAI';
+  const r = call({ action: 'chat', s: 'wnoai', m: 'Здравствуйте!' });
+  global.ZAI_KEY = saved;
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(r.ai, false);
+  assert.ok(/Венеры/.test(r.reply) && /форм/.test(r.reply), 'запасная фраза: ' + r.reply);
+});
+t('chat: публичный — работает без токена администратора', () => {
+  const r = call({ action: 'chat', s: 'wpub', m: 'Цены?' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
 });
 
 console.log('\n=== ' + pass + ' пройдено, ' + fail + ' провалено ===');

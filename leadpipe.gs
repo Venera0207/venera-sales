@@ -12,6 +12,8 @@
      3. хранит всё в своей таблице «Венера — продажи» и дублирует каждую
         заявку письмом и сообщением в Telegram.
 
+   Версия 1.1 — добавлен ассистент на лендинге: публичное действие chat
+   (кнопка-робот на странице пишет сюда, «голова» ИИ та же, что у бота).
    Версия 1.0 — первая отдельная версия (раньше этот код жил внутри трубы
    записи салона ÉCLAT, теперь вынесен в свой проект, чтобы клиентские
    проекты и инструмент продаж никогда не смешивались).
@@ -73,7 +75,7 @@ var LEAD_TEXT_COLS = [2, 3, 4, 5, 6, 7, 8];
 var LEAD_WIDTHS = [150, 170, 145, 155, 175, 560, 95, 150];   /* «Комментарий» — самый широкий */
 
 var CHAT_SHEET = 'Переписка с ботом';
-var CHAT_HEAD  = ['Дата', 'Кто', 'Telegram ID', 'Написал человек', 'Ответил бот', 'Телефон'];
+var CHAT_HEAD  = ['Дата', 'Кто', 'Telegram ID', 'Написал человек', 'Ответил', 'Телефон'];
 var CHAT_TEXT_COLS = [2, 3, 4, 5, 6];
 var CHAT_WIDTHS = [150, 150, 115, 520, 520, 140];
 
@@ -180,14 +182,16 @@ function doGet(e) {
     switch (action) {
       /* --- публичное --- */
       case 'ping':
-        out = { ok: true, project: 'venera-sales', version: 1.0, time: iso(new Date()), tz: TZ,
+        out = { ok: true, project: 'venera-sales', version: 1.1, time: iso(new Date()), tz: TZ,
                 bot: hasBot(), chat: !!chatId(), ai: hasAi(), aiModel: hasAi() ? AI_MODEL : '',
                 landing: LANDING_URL, sheets: [LEAD_SHEET, CHAT_SHEET, LOG_SHEET],
-                hint: 'Публично: ping, lead. По токену: test, setupBot, botOff, aiTest, tidy, list' };
+                hint: 'Публично: ping, lead, chat. По токену: test, setupBot, botOff, aiTest, tidy, list' };
         break;
       case 'lead':
       case 'leadusl':   /* старое имя — лендинг мог его прислать, понимаем оба */
         out = doLead(p); break;
+      case 'chat':      /* ассистент на лендинге: кнопка-робот с той же «головой» ИИ */
+        out = doChat(p); break;
 
       /* --- по токену администратора --- */
       case 'test':     out = guard(p, function () { return doTest(); }); break;
@@ -199,7 +203,7 @@ function doGet(e) {
 
       default:
         out = { ok: false, error: 'Unknown action: ' + action,
-                hint: 'Доступные: ping, lead, test, setupBot, botOff, aiTest, tidy, list' };
+                hint: 'Доступные: ping, lead, chat, test, setupBot, botOff, aiTest, tidy, list' };
     }
   } catch (err) {
     out = { ok: false, error: String(err && err.message || err) };
@@ -346,6 +350,7 @@ function doLead(p) {
 function leadSource(s) {
   s = String(s || '').toLowerCase();
   if (s.indexOf('bot-chat') === 0 || s.indexOf('chatbot') === 0 || s.indexOf('бот') === 0) return 'чат с ботом';
+  if (s.indexOf('web-chat') === 0 || s.indexOf('web') === 0 || s.indexOf('сайт') === 0) return 'чат на сайте';
   if (s.indexOf('tg') === 0 || s.indexOf('telegr') >= 0 || s.indexOf('mini') >= 0 || s.indexOf('bot') >= 0) return 'мини-апп Telegram';
   return 'лендинг';
 }
@@ -626,6 +631,53 @@ function doAiTest() {
   return { ok: !!a, ai: !!a, model: AI_MODEL, answer: a ? a.slice(0, 600) : 'нейросеть не ответила' };
 }
 
+/* -------- ассистент на лендинге (кнопка-робот на странице) --------
+   Публичное действие chat: то же «ядро» ИИ, что у бота, но со своей
+   памятью на сессию страницы. Телефон в сообщении — сразу тёплый лид.  */
+function doChat(p) {
+  var m = String(p.m || p.msg || p.text || '').trim().slice(0, 1500);
+  var s = String(p.s || p.sid || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'anon';
+  if (!m) return { ok: false, error: 'Пустое сообщение', hint: 'Нужны параметры m (текст) и s (сессия).' };
+  var key = 'web-' + s;
+  var answer = '';
+  if (hasAi()) answer = aiReply(m, histGet(key));
+  var viaAi = !!answer;
+  if (answer) histPut(key, m, answer); else answer = webFallbackText();
+
+  /* человек оставил телефон? сразу кладём в лиды — не потеряем */
+  var phone = foundPhone(m);
+  if (phone) {
+    try {
+      doLead({ salon: String(p.salon || ''), name: String(p.n || p.name || ''), contact: phone,
+               want: 'написал(а) ассистенту на лендинге',
+               comment: 'Диалог с ассистентом на сайте:\n' + m, src: 'web-chat', silent: true });
+    } catch (e) {}
+  }
+
+  /* вся переписка с сайта — в свой лист, целиком */
+  try {
+    var cs = chatSheet();
+    appendRowText(cs, [stamp(new Date()), 'сайт (ассистент)', key, m.slice(0, FULL_TEXT),
+                       String(answer || '').slice(0, FULL_TEXT), phone || ''], CHAT_TEXT_COLS);
+    beautify(cs, CHAT_WIDTHS, [2, 4, 5], [1]);
+  } catch (e2) {}
+
+  try {
+    sendToOwner((phone ? '📞 ТЕПЛЫЙ ЛИД: контакт в чате на сайте\n' : '💬 Вопрос ассистенту на сайте\n') +
+                'Текст: ' + m.slice(0, 800) + '\n' +
+                'Ассистент ответил: ' + (viaAi ? 'сам (ИИ)' : 'заготовленной фразой') + '\n' +
+                'Сессия: ' + key + '\nЛендинг: ' + LANDING_URL);
+  } catch (e3) {}
+  logIt('чат на сайте', key + ': ' + m.slice(0, 120));
+  return { ok: true, reply: String(answer).slice(0, 4000), ai: viaAi };
+}
+
+/* запасная фраза ассистента на сайте (ключ ИИ не вставлен или нейросеть молчит) */
+function webFallbackText() {
+  return 'Спасибо, что написали! 💜 Сообщение уже у Венеры — она ответит лично, обычно в течение пары часов.\n' +
+         'А пока можно посмотреть цены и живой пример сайта прямо на этой странице, или оставить заявку в форме — так надёжнее всего.';
+}
+
 /* -------- ответы бота на сообщения (приходят вебхуком в doPost) --------
    Команды — по командам, всё остальное — живой текст от «головы» ИИ.
    Каждое живое сообщение дублируется владелице: это тёплый лид.        */
@@ -705,7 +757,7 @@ function doTest() {
   var sp = db();
   var l = sp.getSheetByName(LEAD_SHEET);
   var c = sp.getSheetByName(CHAT_SHEET);
-  return { ok: true, project: 'venera-sales', version: 1.0,
+  return { ok: true, project: 'venera-sales', version: 1.1,
            db: sp.getName ? sp.getName() : DB_NAME,
            dbUrl: sp.getUrl ? sp.getUrl() : '',
            leads: l ? Math.max(l.getLastRow() - 1, 0) : 0,
