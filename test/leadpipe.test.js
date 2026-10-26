@@ -171,6 +171,10 @@ const AI_KEY = 'GOODKEY-ZAI-TEST';
   .replace("var LEAD_BOT_TOKEN = 'ВСТАВЬТЕ_ТОКЕН_БОТА_ЗАЯВОК';", 'var LEAD_BOT_TOKEN = ' + JSON.stringify(LEAD_TOKEN) + ';')
   .replace(/var ZAI_KEY\s*=\s*'ВСТАВЬТЕ_КЛЮЧ_ZAI';/, 'var ZAI_KEY = ' + JSON.stringify(AI_KEY) + ';'));
 
+/* бережный режим бесплатного ключа в тестах выключаем: иначе половина тестов
+   упрётся в «паузу минуту» вместо нейросети; сама пауза проверена отдельно */
+global.AI_COOLDOWN = 0;
+
 assert.notStrictEqual(global.ADMIN_TOKEN, 'ВСТАВЬТЕ_СВОЙ_ТОКЕН', 'тест не подменил ADMIN_TOKEN');
 assert.strictEqual(global.hasAi(), true, 'тест не подменил ZAI_KEY');
 assert.strictEqual(global.hasBot(), true, 'тест не подменил LEAD_BOT_TOKEN');
@@ -191,11 +195,11 @@ const leadRows = () => DB.getSheetByName('Заявки').v;
 console.log('\n=== ВЕНЕРА — ПРОДАЖИ: тесты отдельной трубы ===\n');
 
 /* ---------- 1. диагностика ---------- */
-t('ping отвечает ok и честно про себя: проект venera-sales, версия 1.3', () => {
+t('ping отвечает ok и честно про себя: проект venera-sales, версия 1.4', () => {
   const r = call({ action: 'ping' });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(r.project, 'venera-sales');
-  assert.strictEqual(r.version, 1.3);
+  assert.strictEqual(r.version, 1.4);
   assert.strictEqual(r.bot, true, 'бот не подключён');
   assert.strictEqual(r.ai, true, 'ключ Z.ai не подхватился');
   assert.ok(/venera-sales\/$/.test(r.landing), 'лендинг: ' + r.landing);
@@ -358,7 +362,7 @@ t('просто «привет» — приветствие без лишнег�
 t('живой вопрос: отвечает НЕЙРОСЕТЬ, владелица получает уведомление со ссылкой «ответить»', () => {
   TG_CALLS.length = 0; AI_CALLS.length = 0;
   tgPost(secret(), { update_id: 20, message: { from: { id: 888, username: 'salon_kzn' },
-    chat: { id: 888, type: 'private' }, text: 'Сколько стоит сайт для салона в Казани?' } });
+    chat: { id: 888, type: 'private' }, text: 'Здравствуйте! Мне нужен сайт для салона в Казани, расскажите про себя' } });
   assert.strictEqual(AI_CALLS.length, 1, 'нейросеть не вызвана');
   assert.ok(/Bearer GOODKEY/.test(AI_CALLS[0].auth), 'ключ не передан: ' + AI_CALLS[0].auth);
   assert.strictEqual(AI_CALLS[0].payload.model, 'glm-4.5-flash');
@@ -461,7 +465,7 @@ t('бесплатный ключ Z.ai: после 429 «голова» проб�
   const saved = global.ZAI_KEY;
   global.ZAI_KEY = 'LIMITKEY-429-TEST-ZAI';
   AI_CALLS.length = 0; SLEEPS.length = 0;
-  const r = call({ action: 'chat', m: 'Сколько стоит сайт для салона?', s: 'retry-1' });
+  const r = call({ action: 'chat', m: 'Здравствуйте! Расскажите, что вы делаете для салонов', s: 'retry-1' });
   global.ZAI_KEY = saved;
   assert.strictEqual(r.ai, true, 'после 429 не повторили запрос: ' + JSON.stringify(r));
   assert.ok(AI_CALLS.length >= 2, 'попыток: ' + AI_CALLS.length);
@@ -625,7 +629,7 @@ t('chat: пустое сообщение — вежливо отказывает
 t('chat: «голова» ИИ отвечает и переписка ложится в «Переписка с ботом»', () => {
   const sh = DB.getSheetByName('Переписка с ботом');
   const before = sh.getLastRow();
-  const r = call({ action: 'chat', s: 'wtest1', m: 'Здравствуйте! Сколько стоит сайт с онлайн-записью?' });
+  const r = call({ action: 'chat', s: 'wtest1', m: 'Здравствуйте! Что вы делаете для салонов красоты?' });
   assert.strictEqual(r.ok, true, JSON.stringify(r));
   assert.strictEqual(r.ai, true, 'ИИ не ответил');
   assert.ok(/30 000/.test(r.reply), 'ответ: ' + r.reply);
@@ -640,7 +644,7 @@ t('chat: «голова» ИИ отвечает и переписка ложит
 t('chat: память сессии — второй вопрос приходит с историей', () => {
   call({ action: 'chat', s: 'wmem', m: 'Привет, хочу сайт для салона' });
   AI_CALLS.length = 0;
-  call({ action: 'chat', s: 'wmem', m: 'А сколько это стоит?' });
+  call({ action: 'chat', s: 'wmem', m: 'А сколько по времени делать?' });
   assert.ok(AI_CALLS.length >= 1, 'второй вопрос не дошёл до ИИ');
   const msgs = AI_CALLS[AI_CALLS.length - 1].payload.messages;
   assert.ok(msgs.length >= 4, 'история не приложена: ' + msgs.length);
@@ -675,6 +679,90 @@ t('chat: без ключа ИИ не молчит — отдаёт запасн�
 t('chat: публичный — работает без токена администратора', () => {
   const r = call({ action: 'chat', s: 'wpub', m: 'Цены?' });
   assert.strictEqual(r.ok, true, JSON.stringify(r));
+});
+
+/* ---------- 9. версия 1.4: честные цены, весь диалог, бережный Z.ai ---------- */
+t('цены: «сколько стоит сайт с редактором» — от 60 000 ₽ с арифметикой, без нейросети', () => {
+  AI_CALLS.length = 0;
+  const r = call({ action: 'chat', m: 'сколько стоит сайт с редактором?', s: 'pr1' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(AI_CALLS.length, 0, 'ценовой вопрос отдали нейросети — а она может сбиться');
+  assert.ok(/60 000 ₽/.test(r.reply), 'нет суммы 60 000: ' + r.reply);
+  assert.ok(/30 000 ₽ \+ 30 000 ₽/.test(r.reply), 'нет арифметики по позициям: ' + r.reply);
+  assert.ok(!/сайт с редактором — от 30 000/.test(r.reply), 'снова вводит в заблуждение: ' + r.reply);
+  assert.ok(/50\/50/.test(r.reply), 'нет условия оплаты: ' + r.reply);
+});
+t('цены: сайт с онлайн-записью без редактора — от 30 000 ₽ и подсказка про доп. позиции', () => {
+  const r = call({ action: 'chat', m: 'Сколько стоит сайт с онлайн-записью?', s: 'pr2' });
+  assert.ok(/от 30 000 ₽/.test(r.reply), r.reply);
+  assert.ok(/ещё 30 000 ₽/.test(r.reply), 'не предложены доп. позиции: ' + r.reply);
+  assert.ok(!/60 000/.test(r.reply), 'лишняя сумма: ' + r.reply);
+});
+t('цены: «сколько стоит всё вместе» — три позиции = от 90 000 ₽', () => {
+  const r = call({ action: 'chat', m: 'Сколько стоит всё вместе?', s: 'pr3' });
+  assert.ok(/90 000 ₽/.test(r.reply), r.reply);
+});
+t('цены: «сколько по времени» НЕ считается ценовым вопросом (это сроки)', () => {
+  AI_CALLS.length = 0;
+  call({ action: 'chat', m: 'Привет! Подскажите, сколько по времени делать сайт?', s: 'pr4' });
+  assert.ok(AI_CALLS.length >= 1, 'вопрос о сроках ошибочно перехвачен шпаргалкой цен');
+});
+t('цены: бот в Telegram тоже считает сайт с редактором как 60 000 ₽', () => {
+  TG_CALLS.length = 0; AI_CALLS.length = 0;
+  tgPost(secret(), { update_id: 40, message: { from: { id: 777 }, chat: { id: 777, type: 'private' },
+    text: 'здравствуйте, сколько стоит сайт с редактором?' } });
+  assert.strictEqual(AI_CALLS.length, 0, 'ценовой вопрос отдали нейросети');
+  const toUser = tgSent().filter(c => c.payload.chat_id === 777);
+  assert.strictEqual(toUser.length, 1);
+  assert.ok(/60 000 ₽/.test(toUser[0].payload.text), toUser[0].payload.text);
+  const owner = tgSent().filter(c => String(c.payload.chat_id) === '8710449510');
+  assert.strictEqual(owner.length, 1, 'владелица не узнала о ценовом вопросе');
+});
+t('владелице приходит ВЕСЬ диалог с ответами ассистента, а не последняя реплика', () => {
+  call({ action: 'chat', m: 'Привет, хочу сайт для салона', s: 'dlg1' });
+  TG_CALLS.length = 0;
+  call({ action: 'chat', m: 'Отлично! Мой телефон +7 917 555-66-77', s: 'dlg1' });
+  const owner = tgSent().filter(c => String(c.payload.chat_id) === '8710449510');
+  assert.strictEqual(owner.length, 1, 'уведомлений владелице: ' + owner.length);
+  const txt = owner[0].payload.text;
+  assert.ok(/хочу сайт для салона/.test(txt), 'первая реплика клиента не видна: ' + txt);
+  assert.ok(/🤖/.test(txt), 'в уведомлении нет ответов ассистента: ' + txt);
+  assert.ok(/555-66-77/.test(txt), 'текущая реплика клиента не видна: ' + txt);
+  assert.ok(/ТЕПЛЫЙ ЛИД/.test(txt), 'тёплый лид не помечен: ' + txt);
+});
+t('тёплый лид из чата: в комментарии к заявке — весь диалог, а не одна строка', () => {
+  const before = leadRows().length;
+  call({ action: 'chat', m: 'Хочу сайт с редактором', s: 'dlg2' });
+  call({ action: 'chat', m: 'Запишите меня: +7 917 777-88-99', s: 'dlg2' });
+  assert.ok(leadRows().length > before, 'лид не создан');
+  const row = leadRows()[leadRows().length - 1];
+  assert.ok(/Хочу сайт с редактором/.test(row[5]), 'первая реплика не попала в лид: ' + row[5]);
+  assert.ok(/🤖/.test(row[5]), 'ответы ассистента не попали в лид: ' + row[5]);
+});
+t('бесплатный Z.ai: чаще раза в минуту не стучимся — шпаргалка вместо гарантированного 429', () => {
+  const savedCd = global.AI_COOLDOWN;
+  global.AI_COOLDOWN = 65;
+  delete CACHE['zai_last_ts'];
+  AI_CALLS.length = 0;
+  const r1 = call({ action: 'chat', m: 'Расскажите, что вы умеете', s: 'cd1' });
+  assert.strictEqual(r1.ai, true, 'первый запрос не дошёл до ИИ: ' + JSON.stringify(r1));
+  const n1 = AI_CALLS.length;
+  const r2 = call({ action: 'chat', m: 'Расскажите, что вы умеете', s: 'cd2' });
+  assert.strictEqual(r2.ai, false, 'второй запрос за минуту снова полез в ИИ');
+  assert.ok(/минут|шпаргалк/.test(String(r2.aiWhy)), 'aiWhy не объясняет паузу: ' + r2.aiWhy);
+  assert.strictEqual(AI_CALLS.length, n1, 'во время паузы были лишние запросы к Z.ai');
+  assert.ok(r2.reply.length > 40, 'во время паузы клиент получил пустоту: ' + r2.reply);
+  assert.ok(/редактор|ассистент|сайт/.test(r2.reply), 'шпаргалка не по теме: ' + r2.reply);
+  global.AI_COOLDOWN = savedCd;
+  delete CACHE['zai_last_ts'];
+});
+t('умная шпаргалка: «как начать» отвечает шагами, а не извинением', () => {
+  const saved = global.ZAI_KEY;
+  global.ZAI_KEY = 'ВСТАВЬТЕ_КЛЮЧ_ZAI';
+  const r = call({ action: 'chat', m: 'как начать? хочу заказать', s: 'sm1' });
+  global.ZAI_KEY = saved;
+  assert.ok(/предоплата|50%/.test(r.reply), r.reply);
+  assert.ok(/15 минут/.test(r.reply), r.reply);
 });
 
 console.log('\n=== ' + pass + ' пройдено, ' + fail + ' провалено ===');
