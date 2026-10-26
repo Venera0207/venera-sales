@@ -107,6 +107,7 @@ global.Logger = { log: (t) => LOGS.push(String(t)) };
 
 /* --- эмуляция Telegram Bot API и Z.ai: запоминаем все обращения --- */
 const TG_CALLS = [];
+const SLEEPS = [];
 const AI_CALLS = [];
 let TG_UPDATES = [];
 let TG_ME = { ok: true, result: { username: 'venera_sites_02_bot', first_name: 'Заявки' } };
@@ -119,9 +120,12 @@ global.UrlFetchApp = {
       try { payload = JSON.parse(opts.payload || '{}'); } catch (e) {}
       const auth = (opts.headers || {})['Authorization'] || '';
       AI_CALLS.push({ auth, payload });
-      if (/GOODKEY/.test(auth)) {
-        return tgResp({ choices: [{ message: { content: '**ИИ отвечает:** сайт для салона — от 30 000 ₽, оплата 50/50.' } }] });
-      }
+      const aiOk = () => tgResp({ choices: [{ message: { content: '**ИИ отвечает:** сайт для салона — от 30 000 ₽, оплата 50/50.' } }] });
+      const ai429 = () => ({ getResponseCode: () => 429,
+        getContentText: () => '{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}' });
+      if (/GOODKEY/.test(auth)) return aiOk();
+      if (/LIMITKEY/.test(auth)) return AI_CALLS.filter(c => /LIMITKEY/.test(c.auth)).length > 1 ? aiOk() : ai429();
+      if (/GREEDYKEY/.test(auth)) return ai429();
       return { getResponseCode: () => 401, getContentText: () => '{"error":"invalid key"}' };
     }
     const tg = /api\.telegram\.org\/bot([^/]+)\/(\w+)/.exec(url);
@@ -142,6 +146,7 @@ global.UrlFetchApp = {
   }
 };
 global.Utilities = {
+  sleep: () => SLEEPS.push(1),
   getUuid: () => 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
   formatDate: (d, tz, pattern) => {
     const p = n => String(n).padStart(2, '0');
@@ -186,11 +191,11 @@ const leadRows = () => DB.getSheetByName('Заявки').v;
 console.log('\n=== ВЕНЕРА — ПРОДАЖИ: тесты отдельной трубы ===\n');
 
 /* ---------- 1. диагностика ---------- */
-t('ping отвечает ok и честно про себя: проект venera-sales, версия 1.1', () => {
+t('ping отвечает ok и честно про себя: проект venera-sales, версия 1.3', () => {
   const r = call({ action: 'ping' });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(r.project, 'venera-sales');
-  assert.strictEqual(r.version, 1.1);
+  assert.strictEqual(r.version, 1.3);
   assert.strictEqual(r.bot, true, 'бот не подключён');
   assert.strictEqual(r.ai, true, 'ключ Z.ai не подхватился');
   assert.ok(/venera-sales\/$/.test(r.landing), 'лендинг: ' + r.landing);
@@ -443,7 +448,7 @@ t('без ключа Z.ai бот не молчит: вежливая запас�
 });
 t('если Z.ai ответил ошибкой — клиент получает запасную фразу, а не тишину', () => {
   const saved = global.ZAI_KEY;
-  global.ZAI_KEY = 'BADKEY-401';
+  global.ZAI_KEY = 'BADKEY-401-TEST-ZAI';
   TG_CALLS.length = 0;
   tgPost(secret(), { update_id: 24, message: { from: { id: 666 }, chat: { id: 666, type: 'private' }, text: 'а что входит в сайт?' } });
   global.ZAI_KEY = saved;
@@ -451,6 +456,40 @@ t('если Z.ai ответил ошибкой — клиент получает
   assert.strictEqual(toUser.length, 1);
   assert.ok(!/BADKEY|401/.test(toUser[0].payload.text), toUser[0].payload.text);
   assert.ok(toUser[0].payload.text.length > 40, 'ответ слишком короткий');
+});
+t('бесплатный ключ Z.ai: после 429 «голова» пробует ещё раз и отвечает', () => {
+  const saved = global.ZAI_KEY;
+  global.ZAI_KEY = 'LIMITKEY-429-TEST-ZAI';
+  AI_CALLS.length = 0; SLEEPS.length = 0;
+  const r = call({ action: 'chat', m: 'Сколько стоит сайт для салона?', s: 'retry-1' });
+  global.ZAI_KEY = saved;
+  assert.strictEqual(r.ai, true, 'после 429 не повторили запрос: ' + JSON.stringify(r));
+  assert.ok(AI_CALLS.length >= 2, 'попыток: ' + AI_CALLS.length);
+  assert.ok(/30 000 ₽/.test(r.reply), r.reply);
+  assert.ok(SLEEPS.length >= 1, 'между попытками не выдержали паузу');
+});
+t('если лимит Z.ai не отпускает — запасная фраза и честная причина (aiWhy)', () => {
+  const saved = global.ZAI_KEY;
+  global.ZAI_KEY = 'GREEDYKEY-429-TEST-ZAI';
+  const r = call({ action: 'chat', m: 'Расскажите про сайт', s: 'retry-2' });
+  global.ZAI_KEY = saved;
+  assert.strictEqual(r.ai, false);
+  assert.ok(/Спасибо, что написали/.test(r.reply), r.reply);
+  assert.ok(/429/.test(String(r.aiWhy)), 'aiWhy: ' + r.aiWhy);
+  assert.ok(/1113|Insufficient balance/.test(String(r.aiWhy)), 'aiWhy: ' + r.aiWhy);
+});
+t('неверный ключ (401) повторно не дёргаем — не тратим чужой лимит', () => {
+  const saved = global.ZAI_KEY;
+  global.ZAI_KEY = 'BADKEY-401-TEST-ZAI';
+  AI_CALLS.length = 0;
+  const r = call({ action: 'chat', m: 'Здравствуйте', s: 'retry-3' });
+  global.ZAI_KEY = saved;
+  assert.strictEqual(r.ai, false);
+  assert.strictEqual(AI_CALLS.length, 1, 'попыток: ' + AI_CALLS.length);
+});
+t('AI_TRY вынесен в настройки (сколько раз пробуем достучаться до Z.ai)', () => {
+  assert.ok(Number(global.AI_TRY) >= 2, 'AI_TRY: ' + global.AI_TRY);
+  assert.ok(/var AI_TRY\s*=/.test(SRC), 'AI_TRY не в настройках файла');
 });
 t('testAiHead: проверка «головы» из редактора пишет в журнал и в Telegram', () => {
   TG_CALLS.length = 0;
