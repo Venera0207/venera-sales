@@ -12,6 +12,9 @@
      3. хранит всё в своей таблице «Венера — продажи» и дублирует каждую
         заявку письмом и сообщением в Telegram.
 
+   Версия 1.3 — «голова» ИИ пробует достучаться до Z.ai несколько раз
+   (AI_TRY): бесплатный ключ отвечает 429 «кончился лимит» примерно через
+   раз, и без повторов люди часто получали запасную фразу вместо ответа.
    Версия 1.2 — ключи перед работой подчищаются от лишних пробелов и
    переносов строк (частая причина молчания бота и «головы» ИИ); если
    нейросеть не ответила, действие chat честно возвращает причину (aiWhy).
@@ -63,6 +66,9 @@ var LEAD_CHAT_ID   = '';
 var ZAI_KEY      = 'ВСТАВЬТЕ_КЛЮЧ_ZAI';
 var AI_MODEL     = 'glm-4.5-flash';   /* бесплатная быстрая модель Z.ai */
 var AI_MAX_CHARS = 3500;              /* предел одного сообщения Telegram — 4096 */
+var AI_TRY       = 2;                 /* попыток достучаться до Z.ai (бесплатный ключ
+                                         часто отвечает 429 «кончился лимит» через раз) */
+var AI_TRY_PAUSE = 3000;              /* пауза между попытками, миллисекунд */
 
 /* ---- защита от «невидимого» пробела: при копировании ключа часто
    цепляется лишний пробел или перенос строки — и Telegram/Z.ai молча
@@ -193,7 +199,7 @@ function doGet(e) {
     switch (action) {
       /* --- публичное --- */
       case 'ping':
-        out = { ok: true, project: 'venera-sales', version: 1.2, time: iso(new Date()), tz: TZ,
+        out = { ok: true, project: 'venera-sales', version: 1.3, time: iso(new Date()), tz: TZ,
                 bot: hasBot(), chat: !!chatId(), ai: hasAi(), aiModel: hasAi() ? AI_MODEL : '',
                 landing: LANDING_URL, sheets: [LEAD_SHEET, CHAT_SHEET, LOG_SHEET],
                 hint: 'Публично: ping, lead, chat. По токену: test, setupBot, botOff, aiTest, tidy, list' };
@@ -611,27 +617,44 @@ function aiReply(msg, hist) {
                     content: String(hist[i].text || '').slice(0, 600) });
   }
   messages.push({ role: 'user', content: String(msg).slice(0, 1500) });
-  try {
-    var r = UrlFetchApp.fetch('https://api.z.ai/api/paas/v4/chat/completions', {
-      method: 'post', muteHttpExceptions: true,
-      headers: { 'Authorization': 'Bearer ' + zaiKey(), 'Content-Type': 'application/json' },
-      payload: JSON.stringify({ model: AI_MODEL, messages: messages, temperature: 0.5, max_tokens: 500 })
-    });
-    var code = r.getResponseCode();
-    var bodyText = '';
-    try { bodyText = r.getContentText('UTF-8'); } catch (e0) {}
-    if (code !== 200) {
+
+  /* Бесплатный ключ Z.ai очень жадный: через раз отвечает 429 «кончился
+     лимит, пополните баланс», а через минуту снова пускает. Поэтому
+     пробуем несколько раз (AI_TRY) — так «голова» отвечает заметно чаще.
+     Всё остальное (неверный ключ, нет интернета) повторяем один раз.      */
+  var tries = Math.max(1, Number(AI_TRY) || 1);
+  var t, code = 0, bodyText = '';
+  for (t = 0; t < tries; t++) {
+    if (t > 0) sleepMs(t === 1 ? AI_TRY_PAUSE : AI_TRY_PAUSE * 2);
+    try {
+      var r = UrlFetchApp.fetch('https://api.z.ai/api/paas/v4/chat/completions', {
+        method: 'post', muteHttpExceptions: true,
+        headers: { 'Authorization': 'Bearer ' + zaiKey(), 'Content-Type': 'application/json' },
+        payload: JSON.stringify({ model: AI_MODEL, messages: messages, temperature: 0.5, max_tokens: 500 })
+      });
+      code = r.getResponseCode();
+      bodyText = '';
+      try { bodyText = r.getContentText('UTF-8'); } catch (e0) {}
+      if (code === 200) {
+        var j = JSON.parse(bodyText);
+        if (j && j.choices && j.choices[0] && j.choices[0].message) return cleanAi(j.choices[0].message.content);
+        AI_WHY = 'Z.ai ответил, но без текста: ' + String(bodyText).replace(/\s+/g, ' ').slice(0, 180);
+        return '';
+      }
       AI_WHY = 'Z.ai ответил ' + code + ': ' + String(bodyText).replace(/\s+/g, ' ').slice(0, 180);
-      return '';
+      if (code !== 429 && code !== 408 && code < 500) return '';  /* не лимит — повторять бесполезно */
+    } catch (e) {
+      AI_WHY = 'не смогли достучаться до Z.ai: ' + String(e && e.message || e).slice(0, 180);
     }
-    var j = JSON.parse(bodyText);
-    if (j && j.choices && j.choices[0] && j.choices[0].message) return cleanAi(j.choices[0].message.content);
-    AI_WHY = 'Z.ai ответил, но без текста: ' + String(bodyText).replace(/\s+/g, ' ').slice(0, 180);
-    return '';
-  } catch (e) {
-    AI_WHY = 'не смогли достучаться до Z.ai: ' + String(e && e.message || e).slice(0, 180);
-    return '';
   }
+  if (tries > 1) AI_WHY = AI_WHY + ' (пробовали ' + tries + ' раза)';
+  return '';
+}
+
+/* маленькая пауза (Apps Script умеет спать только так) */
+function sleepMs(ms) {
+  ms = Math.max(0, Math.min(20000, Number(ms) || 0));
+  if (ms > 0) Utilities.sleep(ms);
 }
 
 /* запасная фраза, если нейросеть молчит или ключ не вставлен */
