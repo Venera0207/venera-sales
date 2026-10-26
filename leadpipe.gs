@@ -12,6 +12,9 @@
      3. хранит всё в своей таблице «Венера — продажи» и дублирует каждую
         заявку письмом и сообщением в Telegram.
 
+   Версия 1.2 — ключи перед работой подчищаются от лишних пробелов и
+   переносов строк (частая причина молчания бота и «головы» ИИ); если
+   нейросеть не ответила, действие chat честно возвращает причину (aiWhy).
    Версия 1.1 — добавлен ассистент на лендинге: публичное действие chat
    (кнопка-робот на странице пишет сюда, «голова» ИИ та же, что у бота).
    Версия 1.0 — первая отдельная версия (раньше этот код жил внутри трубы
@@ -60,6 +63,14 @@ var LEAD_CHAT_ID   = '';
 var ZAI_KEY      = 'ВСТАВЬТЕ_КЛЮЧ_ZAI';
 var AI_MODEL     = 'glm-4.5-flash';   /* бесплатная быстрая модель Z.ai */
 var AI_MAX_CHARS = 3500;              /* предел одного сообщения Telegram — 4096 */
+
+/* ---- защита от «невидимого» пробела: при копировании ключа часто
+   цепляется лишний пробел или перенос строки — и Telegram/Z.ai молча
+   отказывают, хотя ключ как будто вставлен.
+   Поэтому берём их не напрямую, а через три «чистильщика» рядом с hasBot():
+   они вычищают лишнее и читают значение заново при каждом обращении
+   (поправили строку в редакторе — сразу действует).                    */
+var AI_WHY = '';   /* почему «голова» ИИ промолчала — видно в действии chat */
 
 /* ============================ ТАБЛИЦЫ ============================
    Одна своя таблица «Венера — продажи» с тремя листами:
@@ -182,7 +193,7 @@ function doGet(e) {
     switch (action) {
       /* --- публичное --- */
       case 'ping':
-        out = { ok: true, project: 'venera-sales', version: 1.1, time: iso(new Date()), tz: TZ,
+        out = { ok: true, project: 'venera-sales', version: 1.2, time: iso(new Date()), tz: TZ,
                 bot: hasBot(), chat: !!chatId(), ai: hasAi(), aiModel: hasAi() ? AI_MODEL : '',
                 landing: LANDING_URL, sheets: [LEAD_SHEET, CHAT_SHEET, LOG_SHEET],
                 hint: 'Публично: ping, lead, chat. По токену: test, setupBot, botOff, aiTest, tidy, list' };
@@ -247,7 +258,8 @@ function guard(p, fn) {
   return fn();
 }
 function checkToken(token) {
-  return !!token && !!ADMIN_TOKEN && ADMIN_TOKEN.indexOf('ВСТАВЬ') < 0 && String(token) === String(ADMIN_TOKEN);
+  var t = adminToken();
+  return !!token && !!t && t.indexOf('ВСТАВЬ') < 0 && String(token).trim() === t;
 }
 
 /* =========================== ТАБЛИЦЫ =========================== */
@@ -371,13 +383,17 @@ function leadCardText(salon, name, contact, want, comment, src) {
 /* ====================== БОТ ЗАЯВОК (Telegram) ======================
    Отдельный бот — НЕ салонный. Присылает заявки, отвечает людям сам
    («голова» ИИ), кнопка-меню открывает лендинг как мини-апп.          */
-function hasBot() { return !!LEAD_BOT_TOKEN && String(LEAD_BOT_TOKEN).indexOf('ВСТАВЬ') < 0; }
+function hasBot() { var t = botToken(); return !!t && t.indexOf('ВСТАВЬ') < 0; }
+/* «чистильщики» ключей: убирают пробелы и переносы, попавшие при копировании */
+function botToken()  { return String(LEAD_BOT_TOKEN == null ? '' : LEAD_BOT_TOKEN).replace(/\s/g, ''); }
+function zaiKey()    { return String(ZAI_KEY == null ? '' : ZAI_KEY).replace(/\s/g, ''); }
+function adminToken() { return String(ADMIN_TOKEN == null ? '' : ADMIN_TOKEN).trim(); }
 function chatId() {
   try { var stored = props().getProperty('SALES_CHAT_ID'); if (stored) return String(stored); } catch (e) {}
   return String(LEAD_CHAT_ID || '');
 }
 function tgApi(method, payload) {
-  return UrlFetchApp.fetch('https://api.telegram.org/bot' + LEAD_BOT_TOKEN + '/' + method, {
+  return UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken() + '/' + method, {
     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
     payload: JSON.stringify(payload || {})
   });
@@ -516,7 +532,8 @@ function helloText() {
    Работает на том же ключе, что и ассистент салона. Без ключа бот не
    ломается — отвечает заготовленной вежливой фразой.                   */
 function hasAi() {
-  return !!ZAI_KEY && String(ZAI_KEY).indexOf('ВСТАВЬ') < 0 && String(ZAI_KEY).length > 12;
+  var k = zaiKey();
+  return !!k && k.indexOf('ВСТАВЬ') < 0 && k.length > 12;
 }
 
 /* память диалога: последние реплики (кеш скрипта, живёт час) */
@@ -581,9 +598,12 @@ function cleanAi(text) {
   return s;
 }
 
-/* один вопрос к нейросети; вернёт текст или пустую строку (тогда — запасная фраза) */
+/* один вопрос к нейросети; вернёт текст или пустую строку (тогда — запасная фраза).
+   причину молчания кладём в AI_WHY — её видно в ответе действия chat,
+   так что чинить «голову» можно по факту, а не наугад.                     */
 function aiReply(msg, hist) {
-  if (!hasAi()) return '';
+  AI_WHY = '';
+  if (!hasAi()) { AI_WHY = 'ключ Z.ai не заполнен (строка var ZAI_KEY в начале кода)'; return ''; }
   var messages = [{ role: 'system', content: systemPrompt() }];
   var i;
   for (i = 0; i < (hist || []).length; i++) {
@@ -594,14 +614,24 @@ function aiReply(msg, hist) {
   try {
     var r = UrlFetchApp.fetch('https://api.z.ai/api/paas/v4/chat/completions', {
       method: 'post', muteHttpExceptions: true,
-      headers: { 'Authorization': 'Bearer ' + ZAI_KEY, 'Content-Type': 'application/json' },
+      headers: { 'Authorization': 'Bearer ' + zaiKey(), 'Content-Type': 'application/json' },
       payload: JSON.stringify({ model: AI_MODEL, messages: messages, temperature: 0.5, max_tokens: 500 })
     });
-    if (r.getResponseCode() !== 200) return '';
-    var j = JSON.parse(r.getContentText('UTF-8'));
+    var code = r.getResponseCode();
+    var bodyText = '';
+    try { bodyText = r.getContentText('UTF-8'); } catch (e0) {}
+    if (code !== 200) {
+      AI_WHY = 'Z.ai ответил ' + code + ': ' + String(bodyText).replace(/\s+/g, ' ').slice(0, 180);
+      return '';
+    }
+    var j = JSON.parse(bodyText);
     if (j && j.choices && j.choices[0] && j.choices[0].message) return cleanAi(j.choices[0].message.content);
+    AI_WHY = 'Z.ai ответил, но без текста: ' + String(bodyText).replace(/\s+/g, ' ').slice(0, 180);
     return '';
-  } catch (e) { return ''; }
+  } catch (e) {
+    AI_WHY = 'не смогли достучаться до Z.ai: ' + String(e && e.message || e).slice(0, 180);
+    return '';
+  }
 }
 
 /* запасная фраза, если нейросеть молчит или ключ не вставлен */
@@ -628,7 +658,9 @@ function testAiHead() {
 function doAiTest() {
   if (!hasAi()) return { ok: false, ru: 'Ключ Z.ai не вставлен (строка var ZAI_KEY в начале кода).' };
   var a = aiReply('Сколько стоит сайт для салона и как начать?', []);
-  return { ok: !!a, ai: !!a, model: AI_MODEL, answer: a ? a.slice(0, 600) : 'нейросеть не ответила' };
+  return { ok: !!a, ai: !!a, model: AI_MODEL,
+           aiWhy: a ? '' : String(AI_WHY || 'нейросеть не ответила').slice(0, 200),
+           answer: a ? a.slice(0, 600) : 'нейросеть не ответила' };
 }
 
 /* -------- ассистент на лендинге (кнопка-робот на странице) --------
@@ -669,7 +701,9 @@ function doChat(p) {
                 'Сессия: ' + key + '\nЛендинг: ' + LANDING_URL);
   } catch (e3) {}
   logIt('чат на сайте', key + ': ' + m.slice(0, 120));
-  return { ok: true, reply: String(answer).slice(0, 4000), ai: viaAi };
+  var res = { ok: true, reply: String(answer).slice(0, 4000), ai: viaAi };
+  if (!viaAi) res.aiWhy = String(AI_WHY || 'запасная фраза').slice(0, 200);   /* диагностика «головы» */
+  return res;
 }
 
 /* запасная фраза ассистента на сайте (ключ ИИ не вставлен или нейросеть молчит) */
@@ -757,7 +791,7 @@ function doTest() {
   var sp = db();
   var l = sp.getSheetByName(LEAD_SHEET);
   var c = sp.getSheetByName(CHAT_SHEET);
-  return { ok: true, project: 'venera-sales', version: 1.1,
+  return { ok: true, project: 'venera-sales', version: 1.2,
            db: sp.getName ? sp.getName() : DB_NAME,
            dbUrl: sp.getUrl ? sp.getUrl() : '',
            leads: l ? Math.max(l.getLastRow() - 1, 0) : 0,
