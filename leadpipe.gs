@@ -53,6 +53,7 @@ var TZ = 'Europe/Moscow';
 
 /* ---- адреса (меняются редко, я сама их правлю в репозитории) ---- */
 var LANDING_URL   = 'https://venera0207.github.io/venera-sales/';   /* лендинг продаж = мини-апп бота */
+var PORTFOLIO_URL = 'https://venera0207.github.io/venera-portfolio/'; /* сайт-портфолио: тот же ассистент */
 var DEMO_SALON_URL = 'https://venera0207.github.io/eclat-studio/';  /* живой пример салона (демо) */
 var PORTFOLIO_URL = 'https://venera0207.github.io/venera-portfolio/';
 var PHONE_URL     = 'https://wa.me/79278504416';
@@ -212,16 +213,20 @@ function doGet(e) {
     switch (action) {
       /* --- публичное --- */
       case 'ping':
-        out = { ok: true, project: 'venera-sales', version: 1.4, time: iso(new Date()), tz: TZ,
+        out = { ok: true, project: 'venera-sales', version: 1.5, time: iso(new Date()), tz: TZ,
                 bot: hasBot(), chat: !!chatId(), ai: hasAi(), aiModel: hasAi() ? AI_MODEL : '',
                 landing: LANDING_URL, sheets: [LEAD_SHEET, CHAT_SHEET, LOG_SHEET],
-                hint: 'Публично: ping, lead, chat. По токену: test, setupBot, botOff, aiTest, tidy, list' };
+                hint: 'Публично: ping, lead, chat, log, alert. По токену: test, setupBot, botOff, aiTest, tidy, list' };
         break;
       case 'lead':
       case 'leadusl':   /* старое имя — лендинг мог его прислать, понимаем оба */
         out = doLead(p); break;
       case 'chat':      /* ассистент на лендинге: кнопка-робот с той же «головой» ИИ */
         out = doChat(p); break;
+      case 'log':       /* ассистент портфолио докладывает свои обмены — диалог целиком в Telegram */
+        out = doLogSite(p); break;
+      case 'alert':     /* тревога с сайта: клиент не получил ответа */
+        out = doAlertSite(p); break;
 
       /* --- по токену администратора --- */
       case 'test':     out = guard(p, function () { return doTest(); }); break;
@@ -233,7 +238,7 @@ function doGet(e) {
 
       default:
         out = { ok: false, error: 'Unknown action: ' + action,
-                hint: 'Доступные: ping, lead, chat, test, setupBot, botOff, aiTest, tidy, list' };
+                hint: 'Доступные: ping, lead, chat, log, alert, test, setupBot, botOff, aiTest, tidy, list' };
     }
   } catch (err) {
     out = { ok: false, error: String(err && err.message || err) };
@@ -350,6 +355,18 @@ function doLead(p) {
   var want = String(p.want || '').slice(0, 80);
   var comment = String(p.comment || '').slice(0, FULL_TEXT);   /* текст не режем */
   var src = leadSource(p.src || p.source || '');
+  /* комментария нет? соберём: текст заявки + весь диалог сессии (портфолио, лендинг) */
+  if (!comment) {
+    var parts = [];
+    var msgTxt = String(p.message || '').slice(0, 1500);
+    if (msgTxt) parts.push('Заявка с сайта: ' + msgTxt);
+    var lk = String(p.s || p.sid || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+    if (lk) {
+      var lh = histGet('web-' + lk);
+      if (lh.length) parts.push('Диалог с ассистентом на сайте:\n' + dialogText(lh, '', '', 3000));
+    }
+    comment = parts.join('\n\n').slice(0, FULL_TEXT);
+  }
   var sheet = false, mail = false, tg = false;
 
   try {
@@ -381,6 +398,7 @@ function doLead(p) {
 function leadSource(s) {
   s = String(s || '').toLowerCase();
   if (s.indexOf('bot-chat') === 0 || s.indexOf('chatbot') === 0 || s.indexOf('бот') === 0) return 'чат с ботом';
+  if (s.indexOf('портф') >= 0 || s.indexOf('portfolio') >= 0) return 'сайт-портфолио';
   if (s.indexOf('web-chat') === 0 || s.indexOf('web') === 0 || s.indexOf('сайт') === 0) return 'чат на сайте';
   if (s.indexOf('tg') === 0 || s.indexOf('telegr') >= 0 || s.indexOf('mini') >= 0 || s.indexOf('bot') >= 0) return 'мини-апп Telegram';
   return 'лендинг';
@@ -722,6 +740,8 @@ function doAiTest() {
 function doChat(p) {
   var m = String(p.m || p.msg || p.text || '').trim().slice(0, 1500);
   var s = String(p.s || p.sid || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'anon';
+  var site = String(p.site || '').slice(0, 40);          /* лендинг или портфолио */
+  var where = site ? ' (' + site + ')' : '';
   if (!m) return { ok: false, error: 'Пустое сообщение', hint: 'Нужны параметры m (текст) и s (сессия).' };
   var key = 'web-' + s;
   var hist = histGet(key);
@@ -737,31 +757,73 @@ function doChat(p) {
   if (phone) {
     try {
       doLead({ salon: String(p.salon || ''), name: String(p.n || p.name || ''), contact: phone,
-               want: 'написал(а) ассистенту на лендинге',
+               want: 'написал(а) ассистенту на сайте' + where,
                comment: 'Диалог с ассистентом на сайте:\n' + dialogText(hist, m, answer, 3000),
-               src: 'web-chat', silent: true });
+               src: site ? 'портфолио' : 'web-chat', silent: true });
     } catch (e) {}
   }
 
   /* вся переписка с сайта — в свой лист, целиком */
   try {
     var cs = chatSheet();
-    appendRowText(cs, [stamp(new Date()), 'сайт (ассистент)', key, m.slice(0, FULL_TEXT),
+    appendRowText(cs, [stamp(new Date()), (site || 'сайт') + ' (ассистент)', key, m.slice(0, FULL_TEXT),
                        String(answer || '').slice(0, FULL_TEXT), phone || ''], CHAT_TEXT_COLS);
     beautify(cs, CHAT_WIDTHS, [2, 4, 5], [1]);
   } catch (e2) {}
 
   try {
-    sendToOwner((phone ? '📞 ТЕПЛЫЙ ЛИД: контакт в чате на сайте\n' : '💬 Вопрос ассистенту на сайте\n') +
+    sendToOwner((phone ? '📞 ТЕПЛЫЙ ЛИД: контакт в чате на сайте\n' : '💬 Вопрос ассистенту на сайте' + where + '\n') +
                 'Диалог целиком (с ответами ассистента):\n' + dialogText(hist, m, answer, 2600) + '\n' +
                 'Ассистент ответил: ' + (viaAi ? 'сам (ИИ)' : (rule ? 'по шпаргалке цен' : 'по шпаргалке')) + '\n' +
-                'Сессия: ' + key + '\nЛендинг: ' + LANDING_URL);
+                'Сессия: ' + key + '\n' + (site ? 'Сайт: ' + PORTFOLIO_URL : 'Лендинг: ' + LANDING_URL));
   } catch (e3) {}
   logIt('чат на сайте', key + ': ' + m.slice(0, 120));
   var res = { ok: true, reply: String(answer).slice(0, 4000), ai: viaAi };
   if (rule) res.rule = 'цена посчитана по шпаргалке';
   if (!viaAi) res.aiWhy = String(AI_WHY || (rule ? 'ценовой вопрос: шпаргалка' : 'запасная фраза')).slice(0, 200);   /* диагностика «головы» */
   return res;
+}
+
+/* -------- ассистент сайта-портфолио --------
+   Виджет на портфолио большую часть вопросов закрывает сам (своя база
+   ответов), а каждый обмен шлёт сюда действием log. Мы кладём обмен в ту
+   же память сессии, что и чат, и Венера видит в Telegram ВЕСЬ диалог —
+   так же, как с лендинга. Заявку (outcome=lead) дублировать не надо:
+   её уже принесло действие lead вместе с диалогом.                    */
+function doLogSite(p) {
+  var sid = String(p.sid || p.s || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+  var m = String(p.client || p.text || '').slice(0, 1500);
+  var rep = String(p.bot || p.reply || '').slice(0, 1500);
+  var outcome = String(p.outcome || '').slice(0, 40);
+  var page = String(p.page || '').slice(0, 120);
+  if (!sid && !m) return { ok: false, error: 'log: пустой обмен', hint: 'Нужны sid и client/bot.' };
+  if (outcome === 'lead') { logIt('журнал сайта', (sid || 'anon') + ': заявка (диалог уже в заявке)'); return { ok: true, skipped: 'lead' }; }
+  var key = 'web-' + (sid || 'anon');
+  var hist = histGet(key);
+  if (m || rep) histPut(key, m, rep);
+  try {
+    var cs = chatSheet();
+    appendRowText(cs, [stamp(new Date()), 'портфолио (ассистент)', key, m.slice(0, FULL_TEXT),
+                       rep.slice(0, FULL_TEXT), ''], CHAT_TEXT_COLS);
+    beautify(cs, CHAT_WIDTHS, [2, 4, 5], [1]);
+  } catch (e) {}
+  try {
+    sendToOwner('💬 Диалог на сайте-портфолио\n' +
+                'Диалог целиком (с ответами ассистента):\n' + dialogText(hist, m, rep, 2600) + '\n' +
+                'Ассистент ответил: по своей базе' + (outcome ? ' (случай: ' + outcome + ')' : '') + '\n' +
+                'Страница: ' + (page || '—') + '\nСессия: ' + key + '\nПортфолио: ' + PORTFOLIO_URL);
+  } catch (e2) {}
+  logIt('журнал сайта-портфолио', key + ': ' + m.slice(0, 100));
+  return { ok: true, logged: key };
+}
+
+/* тревога с сайта (например, нейросеть не ответила клиенту) */
+function doAlertSite(p) {
+  var t = String(p.text || '').slice(0, 600);
+  if (!t) return { ok: false, error: 'alert: пустой текст' };
+  try { sendToOwner('⚠️ Сигнал с сайта: ' + t); } catch (e) {}
+  logIt('сигнал с сайта', t.slice(0, 120));
+  return { ok: true };
 }
 
 /* запасная фраза ассистента на сайте (ключ ИИ не вставлен или нейросеть молчит) */
@@ -964,7 +1026,7 @@ function doTest() {
   var sp = db();
   var l = sp.getSheetByName(LEAD_SHEET);
   var c = sp.getSheetByName(CHAT_SHEET);
-  return { ok: true, project: 'venera-sales', version: 1.4,
+  return { ok: true, project: 'venera-sales', version: 1.5,
            db: sp.getName ? sp.getName() : DB_NAME,
            dbUrl: sp.getUrl ? sp.getUrl() : '',
            leads: l ? Math.max(l.getLastRow() - 1, 0) : 0,
