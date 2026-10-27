@@ -12,7 +12,7 @@
 
   var CFG = window.SALES || {};
   var PIPE = String(CFG.pipeUrl || '');
-  var ROBOT = 'img/robot.jpg?v=1';
+  var ROBOT = 'img/robot.png?v=2';
 
   /* ---------- стили (всё внутри, внешних файлов нет) ---------- */
   var css = '' +
@@ -20,7 +20,7 @@
     'overflow:hidden;cursor:pointer;background:#DDEBFF;z-index:9998;' +
     'box-shadow:0 12px 32px rgba(124,58,237,.45),0 8px 20px rgba(0,0,0,.45);animation:vsFloat 4s ease-in-out infinite}' +
     '.vs-btn:hover{filter:brightness(1.08)}' +
-    '.vs-btn img{width:100%;height:100%;object-fit:cover;object-position:50% 30%;display:block}' +
+    '.vs-btn img{width:100%;height:100%;object-fit:contain;object-position:50% 50%;padding:6px;box-sizing:border-box;display:block}' +
     '@keyframes vsFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}' +
     '.vs-bubble{position:fixed;right:24px;bottom:106px;max-width:230px;background:#151522;color:#edebf4;' +
     'border:1px solid #26263a;border-radius:14px 14px 4px 14px;padding:10px 13px;font:14px/1.45 "Segoe UI",system-ui,sans-serif;' +
@@ -32,7 +32,7 @@
     'font:15px/1.5 "Segoe UI",system-ui,sans-serif}' +
     '.vs-panel.open{display:flex}' +
     '.vs-head{display:flex;align-items:center;gap:10px;padding:12px 14px;background:#151522;border-bottom:1px solid #26263a}' +
-    '.vs-head img{width:42px;height:42px;border-radius:50%;object-fit:cover;object-position:50% 30%}' +
+    '.vs-head img{width:42px;height:42px;border-radius:50%;object-fit:contain;object-position:50% 50%;padding:3px;box-sizing:border-box}' +
     '.vs-head b{display:block;font-size:15px}' +
     '.vs-head span{display:block;font-size:12px;color:#9a96ae}' +
     '.vs-close{margin-left:auto;background:none;border:none;color:#9a96ae;font-size:20px;cursor:pointer;padding:4px 6px}' +
