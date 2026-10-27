@@ -195,11 +195,11 @@ const leadRows = () => DB.getSheetByName('Заявки').v;
 console.log('\n=== ВЕНЕРА — ПРОДАЖИ: тесты отдельной трубы ===\n');
 
 /* ---------- 1. диагностика ---------- */
-t('ping отвечает ok и честно про себя: проект venera-sales, версия 1.4', () => {
+t('ping отвечает ok и честно про себя: проект venera-sales, версия 1.5', () => {
   const r = call({ action: 'ping' });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(r.project, 'venera-sales');
-  assert.strictEqual(r.version, 1.4);
+  assert.strictEqual(r.version, 1.5);
   assert.strictEqual(r.bot, true, 'бот не подключён');
   assert.strictEqual(r.ai, true, 'ключ Z.ai не подхватился');
   assert.ok(/venera-sales\/$/.test(r.landing), 'лендинг: ' + r.landing);
@@ -763,6 +763,52 @@ t('умная шпаргалка: «как начать» отвечает ша�
   global.ZAI_KEY = saved;
   assert.ok(/предоплата|50%/.test(r.reply), r.reply);
   assert.ok(/15 минут/.test(r.reply), r.reply);
+});
+
+t('v1.5: портфолио — каждый обмен диалога приходит в Telegram (log)', () => {
+  TG_CALLS.length = 0;
+  const r1 = call({ action: 'log', sid: 'pf1', page: '/index.html', site: 'портфолио',
+                    client: 'Сколько стоит сайт?', bot: 'Сайт — от 30 000 ₽', outcome: 'kb' });
+  assert.strictEqual(r1.ok, true, JSON.stringify(r1));
+  let sent = tgSent();
+  assert.strictEqual(sent.length, 1, 'обмен портфолио не пришёл в Telegram');
+  assert.ok(/портфолио/.test(sent[0].payload.text), sent[0].payload.text.slice(0, 90));
+  assert.ok(/Сколько стоит сайт\?/.test(sent[0].payload.text), 'в сообщении нет вопроса клиента');
+  const r2 = call({ action: 'log', sid: 'pf1', client: 'А с роботом-помощником?', bot: 'ИИ-ассистент — от 30 000 ₽', outcome: 'kb' });
+  assert.strictEqual(r2.ok, true);
+  const txt = tgSent().pop().payload.text;
+  assert.ok(/Сколько стоит сайт\?/.test(txt) && /А с роботом-помощником\?/.test(txt),
+            'диалог не накопился целиком: ' + txt.slice(0, 140));
+  const rows = DB.getSheetByName('Переписка с ботом').getDataRange().getValues().slice(1);
+  assert.ok(rows.some(r => /портфолио \(ассистент\)/.test(String(r[1])) && /Сколько стоит сайт\?/.test(String(r[3]))),
+            'обмены портфолио не пишутся в переписку');
+});
+t('v1.5: log с outcome=lead не дублирует заявку в Telegram', () => {
+  TG_CALLS.length = 0;
+  const r = call({ action: 'log', sid: 'pf1', client: '+7 927 850-44-16', bot: 'Спасибо, свяжусь сегодня', outcome: 'lead' });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.skipped, 'lead');
+  assert.strictEqual(tgSent().length, 0, 'заявка через log должна молчать: её несёт действие lead');
+});
+t('v1.5: сигнал с сайта (alert) доходит до Венеры', () => {
+  TG_CALLS.length = 0;
+  const r = call({ action: 'alert', text: 'Клиент не получил ответа нейросети: «здравствуйте»' });
+  assert.strictEqual(r.ok, true);
+  assert.ok(/Сигнал с сайта/.test(tgSent().pop().payload.text));
+});
+t('v1.5: чат помечен сайтом, заявка с портфолио забирает весь диалог', () => {
+  TG_CALLS.length = 0;
+  const rc = call({ action: 'chat', msg: 'Здравствуйте, хочу сайт для парикмахерской', s: 'pf2', site: 'портфолио' });
+  assert.ok(rc.ok && rc.reply, JSON.stringify(rc));
+  assert.ok(/\(портфолио\)/.test(tgSent().pop().payload.text), 'чат с портфолио не помечен');
+  TG_CALLS.length = 0;
+  const rl = call({ action: 'lead', name: 'Айгуль', contact: '+7 900 111-22-33',
+                    message: 'Хочу сайт-визитку', source: 'портфолио', s: 'pf2' });
+  assert.ok(rl.ok, JSON.stringify(rl));
+  assert.strictEqual(rl.src, 'сайт-портфолио', rl.src);
+  const card = tgSent().pop().payload.text;
+  assert.ok(/Заявка с сайта: Хочу сайт-визитку/.test(card), 'в карточке нет текста заявки: ' + card.slice(0, 160));
+  assert.ok(/хочу сайт для парикмахерской/.test(card), 'в карточке нет диалога: ' + card.slice(0, 160));
 });
 
 console.log('\n=== ' + pass + ' пройдено, ' + fail + ' провалено ===');
