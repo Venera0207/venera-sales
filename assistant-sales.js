@@ -12,7 +12,7 @@
 
   var CFG = window.SALES || {};
   var PIPE = String(CFG.pipeUrl || '');
-  var ROBOT = 'img/robot.png?v=2';
+  var ROBOT = 'img/robot.png?v=3';
 
   /* ---------- стили (всё внутри, внешних файлов нет) ---------- */
   var css = '' +
